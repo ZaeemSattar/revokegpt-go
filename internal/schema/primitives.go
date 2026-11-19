@@ -148,8 +148,6 @@ func oneOf(v any, set ...string) bool {
 
 var (
 	hashedAccountID = regexp.MustCompile(`\A[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=\z`)
-	base64url32     = regexp.MustCompile(`\A[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]\z`)
-	base64url8      = regexp.MustCompile(`\A[A-Za-z0-9_-]{10}[AEIMQUYcgkosw048]\z`)
 	cdata           = regexp.MustCompile(`\A[A-Za-z0-9_-]{0,255}\z`)
 	e164            = regexp.MustCompile(`\A\+[1-9][0-9]{6,14}\z`)
 	languageCode    = regexp.MustCompile(`\A[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}\z`)

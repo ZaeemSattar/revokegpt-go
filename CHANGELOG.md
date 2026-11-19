@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+Removes two unused validators (staticcheck U1000) left by the password-check removal. No API change.
+
 ## 0.1.0
 
 The first release (not yet tagged).

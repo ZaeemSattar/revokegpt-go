@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+Removes two unused validators (staticcheck U1000) left by the password-check removal. No API change.
+
 ## Unreleased
 
 - Bundle kill switch: an optional boolean `disabled`; when true every request passes through untouched (no rules, cookies, challenge, `X-RG-Sig` or verify call).

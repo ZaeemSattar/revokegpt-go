@@ -28,7 +28,7 @@ import (
 )
 
 // Version is the integration version sent as X-RG-Integration: go-net-http/<Version>.
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 const defaultAPIBase = "https://api.revokegpt.com"
 
