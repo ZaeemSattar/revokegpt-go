@@ -1,0 +1,76 @@
+# CI for the Go core module and the firewall module (firewall/) on Go 1.26 and 1.27. The modules
+# require the core module at its released version, which a branch build cannot fetch before the tag exists, so the
+# jobs build in a workspace (go.work) that uses this checkout of the core. govulncheck runs on the latest patched
+# Go (the standard library advisory fixed in 1.27.4).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  GOVULNCHECK: golang.org/x/vuln/cmd/govulncheck@v1.9.0
+  STATICCHECK: honnef.co/go/tools/cmd/staticcheck@2026.2.2
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.26', '1.27']
+        module: ['.', firewall]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Workspace of the two modules (this checkout stands in for the core tag)
+        run: sh scripts/workspace.sh
+      - name: Verify, vet, test
+        working-directory: ${{ matrix.module }}
+        run: |
+          go mod verify
+          go vet ./...
+          go test ./...
+      - name: staticcheck (core module)
+        if: matrix.module == '.'
+        run: |
+          go install "$STATICCHECK"
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
+  vulncheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ['.', firewall]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '>=1.27.4'
+          check-latest: true
+          cache: false
+      - name: Workspace of the two modules (this checkout stands in for the core tag)
+        run: sh scripts/workspace.sh
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        run: |
+          go install "$GOVULNCHECK"
+          "$(go env GOPATH)/bin/govulncheck" ./...

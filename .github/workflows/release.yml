@@ -1,0 +1,162 @@
+# Tags `v*` (core) and `firewall/v*`: tests, `go mod verify`, then asks the Go module proxy for the tag so
+# the proxy and the checksum database have it. Go modules are not uploaded anywhere; the tag is the release. The core
+# tag comes first: the firewall pins the exact core version (it uses its internals), and the gate
+# refuses it unless that core tag already exists and the two versions agree. A manual run with dry-run true
+# (the default) tests and verifies but does not ask the proxy.
+name: release
+
+on:
+  push:
+    tags: ['v*', 'firewall/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Run everything except the final upload (a real release needs a tag on the default branch)
+        required: true
+        type: boolean
+        default: true
+      module:
+        description: Which module a manual run checks
+        required: true
+        type: choice
+        options: [core, firewall]
+        default: core
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOVULNCHECK: golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      dry-run: ${{ steps.gate.outputs.dry_run }}
+      module: ${{ steps.gate.outputs.module }}
+      tag: ${{ steps.gate.outputs.tag }}
+      dir: ${{ steps.gate.outputs.dir }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Gate
+        id: gate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_DRY_RUN: ${{ inputs.dry-run }}
+          INPUT_MODULE: ${{ inputs.module }}
+          TAG_RE: '^(firewall/)?v[0-9]+[.][0-9]+[.][0-9]+$'
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then dry=false; else dry="$INPUT_DRY_RUN"; fi
+          case "$dry" in true|false) ;; *) echo "::error::bad dry-run value"; exit 1 ;; esac
+          if [ "$dry" = "false" ]; then
+            # A real release: an annotated tag of this repository whose commit is on the default branch.
+            [ "$REF_TYPE" = "tag" ] || { echo "::error::a real release runs from a tag"; exit 1; }
+            printf '%s' "$REF_NAME" | grep -Eq "$TAG_RE" || { echo "::error::the tag does not match $TAG_RE"; exit 1; }
+            [ "$(git cat-file -t "refs/tags/$REF_NAME")" = "tag" ] || { echo "::error::the tag is not annotated"; exit 1; }
+            sha="$(git rev-parse --verify "refs/tags/$REF_NAME^{commit}")"
+            # The jobs after this one build and publish the commit of the event, not whatever the tag says later.
+            [ "$sha" = "$GITHUB_SHA" ] || { echo "::error::the tag no longer points at the commit this run was started for"; exit 1; }
+            git rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null || { echo "::error::no default branch"; exit 1; }
+            git merge-base --is-ancestor "$sha" "origin/$DEFAULT_BRANCH" || { echo "::error::the tagged commit is not on the default branch"; exit 1; }
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            case "$REF_NAME" in firewall/*) kind=firewall ;; *) kind=core ;; esac
+          else
+            kind="$INPUT_MODULE"
+          fi
+          core_version="$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go | head -n 1)"
+          if [ -z "$core_version" ]; then echo "::error::no version in version.go"; exit 1; fi
+          case "$kind" in
+            core) dir=.; path=github.com/ZaeemSattar/revokegpt-go ;;
+            firewall) dir=firewall; path=github.com/ZaeemSattar/revokegpt-go/firewall ;;
+            *) echo "::error::bad module"; exit 1 ;;
+          esac
+          tag="v$core_version"
+          [ "$kind" = "core" ] || tag="$kind/v$core_version"
+          if [ "$dry" = "false" ] && [ "$REF_NAME" != "$tag" ]; then
+            echo "::error::the tag must be $tag (the two modules release in lockstep at the core version)"; exit 1
+          fi
+          if [ "$kind" != "core" ]; then
+            # Core first: the dependent module must already have its core tag, on the same version.
+            if [ "$dry" = "false" ]; then
+              git rev-parse --verify --quiet "refs/tags/v$core_version" >/dev/null || { echo "::error::tag v$core_version of the core module does not exist yet; tag the core first"; exit 1; }
+              core_sha="$(git rev-parse --verify "refs/tags/v$core_version^{commit}")"
+              git merge-base --is-ancestor "$core_sha" "origin/$DEFAULT_BRANCH" || { echo "::error::the core tag is not on the default branch"; exit 1; }
+            fi
+            grep -Eq "^[[:space:]]*(require )?github.com/ZaeemSattar/revokegpt-go v$core_version$" "$dir/go.mod" || { echo "::error::$dir/go.mod does not require the core at exactly v$core_version"; exit 1; }
+          fi
+          { echo "dry_run=$dry"; echo "module=$path"; echo "tag=$tag"; echo "dir=$dir"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '>=1.27.4'
+          check-latest: true
+          cache: false
+      - name: Verify, vet, test and scan, building the dependent modules the way a user's build does
+        shell: bash
+        env:
+          MODULE_DIR: ${{ steps.gate.outputs.dir }}
+          DRY_RUN: ${{ steps.gate.outputs.dry_run }}
+        run: |
+          set -euo pipefail
+          core_version="$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go)"
+          if [ "$DRY_RUN" = "true" ] && [ "$MODULE_DIR" != "." ]; then
+            # The core tag is not on the proxy yet: serve this checkout's core from a file:// proxy. It is still the
+            # path of a real release (no workspace, the core fetched by version); only the proxy differs.
+            sh scripts/local-proxy.sh "$core_version" "$RUNNER_TEMP/proxy"
+            export GOPROXY="file://$RUNNER_TEMP/proxy,https://proxy.golang.org"
+            export GOSUMDB=off
+          fi
+          cd "$MODULE_DIR"
+          if [ "$MODULE_DIR" != "." ]; then
+            # The export has no go.sum line for the core: take it from the proxy, checked by the checksum database.
+            go get "github.com/ZaeemSattar/revokegpt-go@v$core_version"
+          fi
+          go mod verify
+          go vet ./...
+          go test ./...
+          go install "$GOVULNCHECK"
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  warm-proxy:
+    needs: verify
+    if: needs.verify.outputs.dry-run == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '>=1.27.4'
+          check-latest: true
+          cache: false
+      - name: Ask the proxy for the tag, so the proxy and the checksum database have it
+        shell: bash
+        env:
+          MODULE_PATH: ${{ needs.verify.outputs.module }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          GOPROXY: https://proxy.golang.org
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG##*/}"
+          for _ in 1 2 3 4 5 6; do
+            if go list -m "$MODULE_PATH@$version"; then exit 0; fi
+            sleep 20
+          done
+          echo "::error::the proxy did not serve $MODULE_PATH@$version"; exit 1
